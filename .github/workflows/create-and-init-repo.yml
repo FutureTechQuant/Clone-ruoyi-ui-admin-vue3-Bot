@@ -147,8 +147,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
           git commit -q -m "Initial commit: 梦开始的地方"
-          git branch -M master
+          git branch -M main
           git remote add origin "https://github.com/${ORG}/${NEW_REPO}.git"
-          git push -q -u origin master
+          git push -q -u origin main
 
           rm -f ~/.git-credentials
