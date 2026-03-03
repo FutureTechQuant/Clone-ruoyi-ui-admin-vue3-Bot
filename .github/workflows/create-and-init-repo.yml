@@ -16,7 +16,7 @@ on:
         required: false
         default: "false"
       default_branch:
-        description: "新仓库默认开发分支名（main 或 master）"
+        description: "新仓库默认分支名（main 或 master）"
         required: false
         default: "master"
 
@@ -43,10 +43,6 @@ jobs:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ env.ORG }}
-          # 显式声明需要的权限（需要你在 GitHub App 安装时也授予这些权限）
-          permission-administration: write
-          permission-contents: write
-          permission-pages: write
 
       - name: Export APP_TOKEN
         shell: bash
@@ -82,7 +78,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           git clone -q --depth=1 --single-branch \
             https://gitee.com/yudaocode/yudao-ui-admin-vue3.git source
 
@@ -106,11 +101,11 @@ jobs:
             exit 1
           fi
 
-          # 方案B：pages.yml 内部应使用 upload-pages-artifact + deploy-pages
           cp -f templates/workflows/pages.yml source/.github/workflows/pages.yml
 
-          # 如果你之前还有 enable-pages-once.yml（workflow_run 触发）建议方案B下不再需要
-          # 如需保留可自行 cp 进去，但方案B推荐删掉链路更短
+          # 把 pages.yml 里触发分支改成你输入的默认分支（main/master）
+          # 这里假设模板里是：branches: [ master ]
+          sed -i "s/branches: \\[ master \\]/branches: [ ${DEFAULT_BRANCH} ]/g" source/.github/workflows/pages.yml || true
 
       - name: Prepare repo content
         shell: bash
@@ -127,7 +122,8 @@ jobs:
 
           PRIVATE_BOOL=$( [ "${PRIVATE}" = "true" ] && echo true || echo false )
 
-          RESP="$(curl -sS \
+          RESP_FILE="$(mktemp)"
+          HTTP_CODE="$(curl -sS -o "${RESP_FILE}" -w "%{http_code}" \
             -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${APP_TOKEN}" \
@@ -139,14 +135,15 @@ jobs:
               \"private\": ${PRIVATE_BOOL}
             }")"
 
-          if ! echo "${RESP}" | grep -q '"full_name"'; then
-            echo "ERROR: Failed to create repo. Response: ${RESP}"
+          if [ "${HTTP_CODE}" != "201" ]; then
+            echo "ERROR: Failed to create repo (HTTP ${HTTP_CODE}). Response:"
+            cat "${RESP_FILE}"
             exit 1
           fi
 
           sleep 3
 
-      - name: Push to new repo (default branch)
+      - name: Push to new repo (DEFAULT_BRANCH)
         shell: bash
         run: |
           set -euo pipefail
@@ -167,15 +164,36 @@ jobs:
 
           rm -f ~/.git-credentials
 
-      - name: Enable Pages (build_type=workflow)
+      - name: Set repository default branch (optional but recommended)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RESP_FILE="$(mktemp)"
+          HTTP_CODE="$(curl -sS -o "${RESP_FILE}" -w "%{http_code}" \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${APP_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${ORG}/${NEW_REPO}" \
+            -d "{\"default_branch\":\"${DEFAULT_BRANCH}\"}")"
+
+          if [ "${HTTP_CODE}" != "200" ]; then
+            echo "WARN: Set default_branch failed (HTTP ${HTTP_CODE}). Response:"
+            cat "${RESP_FILE}"
+            # 不强制失败，继续后续 Pages
+          fi
+
+      - name: Enable Pages (build_type=workflow) - scheme B
         shell: bash
         run: |
           set -euo pipefail
 
           echo "Enable Pages for ${ORG}/${NEW_REPO} with build_type=workflow"
 
-          # 先尝试创建 Pages（如果已存在会返回 409）
-          CODE="$(curl -sS -o /dev/null -w "%{http_code}" \
+          # 1) Create Pages site if needed
+          RESP_FILE1="$(mktemp)"
+          CODE1="$(curl -sS -o "${RESP_FILE1}" -w "%{http_code}" \
             -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${APP_TOKEN}" \
@@ -186,10 +204,19 @@ jobs:
               \"source\": {\"branch\": \"${DEFAULT_BRANCH}\", \"path\": \"/\"}
             }")"
 
-          echo "Create Pages HTTP: ${CODE}"
+          if [ "${CODE1}" = "201" ]; then
+            echo "Pages created"
+          elif [ "${CODE1}" = "409" ]; then
+            echo "Pages already exists (409), continue"
+          else
+            echo "WARN: Create Pages returned HTTP ${CODE1}. Response:"
+            cat "${RESP_FILE1}"
+            # 不立刻退出，继续 PUT（很多情况下站点已存在或需要 PUT 修正）
+          fi
 
-          # 再强制更新为 workflow（成功为 204）
-          CODE2="$(curl -sS -o /dev/null -w "%{http_code}" \
+          # 2) Force set build_type=workflow
+          RESP_FILE2="$(mktemp)"
+          CODE2="$(curl -sS -o "${RESP_FILE2}" -w "%{http_code}" \
             -X PUT \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${APP_TOKEN}" \
@@ -197,10 +224,15 @@ jobs:
             "https://api.github.com/repos/${ORG}/${NEW_REPO}/pages" \
             -d "{\"build_type\":\"workflow\"}")"
 
-          echo "Update Pages HTTP: ${CODE2}"
+          if [ "${CODE2}" != "204" ] && [ "${CODE2}" != "200" ]; then
+            echo "ERROR: Update Pages build_type failed (HTTP ${CODE2}). Response:"
+            cat "${RESP_FILE2}"
+            exit 1
+          fi
 
-      - name: Print Pages URL (expected)
+      - name: Print expected Pages URL
         shell: bash
         run: |
           set -euo pipefail
-          echo "Expected: https://${ORG,,}.github.io/${NEW_REPO}/"
+          echo "Expected Pages URL:"
+          echo "https://${ORG,,}.github.io/${NEW_REPO}/"
