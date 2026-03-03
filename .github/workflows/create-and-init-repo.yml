@@ -1,4 +1,4 @@
-name: Create and init Vue3 UI repo
+name: Create and init Vue3 UI repo (org, Pages via Actions)
 
 on:
   workflow_dispatch:
@@ -15,6 +15,10 @@ on:
         description: "是否创建为私有仓库 (true/false)"
         required: false
         default: "false"
+      default_branch:
+        description: "新仓库默认开发分支名（main 或 master）"
+        required: false
+        default: "master"
 
 jobs:
   create-and-init:
@@ -26,18 +30,23 @@ jobs:
       NEW_REPO: ${{ github.event.inputs.repo_name }}
       REPO_DESC: ${{ github.event.inputs.repo_description }}
       PRIVATE: ${{ github.event.inputs.private }}
+      DEFAULT_BRANCH: ${{ github.event.inputs.default_branch }}
 
     steps:
       - name: Checkout Clone-Bot
         uses: actions/checkout@v4
 
-      - name: Generate GitHub App installation token
+      - name: Generate GitHub App installation token (org)
         id: app-token
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ env.ORG }}
+          # 显式声明需要的权限（需要你在 GitHub App 安装时也授予这些权限）
+          permission-administration: write
+          permission-contents: write
+          permission-pages: write
 
       - name: Export APP_TOKEN
         shell: bash
@@ -52,23 +61,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           CODE="$(curl -sS -o /dev/null -w "%{http_code}" \
             -H "Authorization: Bearer ${APP_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${ORG}/${NEW_REPO}")"
 
           if [ "${CODE}" = "200" ]; then
+            echo "Repo exists, deleting: ${ORG}/${NEW_REPO}"
             curl -sS -o /dev/null -X DELETE \
               -H "Authorization: Bearer ${APP_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/${ORG}/${NEW_REPO}"
             sleep 3
+          else
+            echo "Repo not found (HTTP ${CODE}), skip delete"
           fi
 
       - name: Clone from Gitee
         shell: bash
         run: |
           set -euo pipefail
+
           git clone -q --depth=1 --single-branch \
             https://gitee.com/yudaocode/yudao-ui-admin-vue3.git source
 
@@ -91,13 +105,12 @@ jobs:
             echo "ERROR: templates/workflows/pages.yml not found"
             exit 1
           fi
-          if [ ! -f "templates/workflows/enable-pages-once.yml" ]; then
-            echo "ERROR: templates/workflows/enable-pages-once.yml not found"
-            exit 1
-          fi
 
+          # 方案B：pages.yml 内部应使用 upload-pages-artifact + deploy-pages
           cp -f templates/workflows/pages.yml source/.github/workflows/pages.yml
-          cp -f templates/workflows/enable-pages-once.yml source/.github/workflows/enable-pages-once.yml
+
+          # 如果你之前还有 enable-pages-once.yml（workflow_run 触发）建议方案B下不再需要
+          # 如需保留可自行 cp 进去，但方案B推荐删掉链路更短
 
       - name: Prepare repo content
         shell: bash
@@ -133,7 +146,7 @@ jobs:
 
           sleep 3
 
-      - name: Push to new repo
+      - name: Push to new repo (default branch)
         shell: bash
         run: |
           set -euo pipefail
@@ -147,8 +160,47 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .
           git commit -q -m "Initial commit: 梦开始的地方"
-          git branch -M main
+
+          git branch -M "${DEFAULT_BRANCH}"
           git remote add origin "https://github.com/${ORG}/${NEW_REPO}.git"
-          git push -q -u origin main
+          git push -q -u origin "${DEFAULT_BRANCH}"
 
           rm -f ~/.git-credentials
+
+      - name: Enable Pages (build_type=workflow)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Enable Pages for ${ORG}/${NEW_REPO} with build_type=workflow"
+
+          # 先尝试创建 Pages（如果已存在会返回 409）
+          CODE="$(curl -sS -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${APP_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${ORG}/${NEW_REPO}/pages" \
+            -d "{
+              \"build_type\": \"workflow\",
+              \"source\": {\"branch\": \"${DEFAULT_BRANCH}\", \"path\": \"/\"}
+            }")"
+
+          echo "Create Pages HTTP: ${CODE}"
+
+          # 再强制更新为 workflow（成功为 204）
+          CODE2="$(curl -sS -o /dev/null -w "%{http_code}" \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${APP_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${ORG}/${NEW_REPO}/pages" \
+            -d "{\"build_type\":\"workflow\"}")"
+
+          echo "Update Pages HTTP: ${CODE2}"
+
+      - name: Print Pages URL (expected)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Expected: https://${ORG,,}.github.io/${NEW_REPO}/"
