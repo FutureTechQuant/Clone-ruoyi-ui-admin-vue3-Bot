@@ -20,15 +20,15 @@ on:
         required: false
         default: "master"
 
-      # 方案2：默认启用“若存在则删除重建”，但必须人工确认
+      # 默认删除重建：你要的“构建素材项目”模式
       delete_existing:
         description: "若同名仓库已存在，是否删除后重建 (true/false)"
         required: false
         default: "true"
       confirm_delete:
-        description: "仅当 delete_existing=true 且 confirm_delete=DELETE 才会删除"
+        description: "删除确认（默认已填 DELETE；如不想删可把 delete_existing 设为 false）"
         required: false
-        default: ""
+        default: "DELETE"
 
       custom_domain:
         description: "Pages 自定义域名（例如：admin.fscitech.net；留空则不绑定）"
@@ -78,7 +78,7 @@ jobs:
       - name: Install Python dependencies
         run: pip install -q -r tools/requirements.txt
 
-      - name: Delete existing repo if exists (scheme 2)
+      - name: Delete existing repo if exists (default ON)
         shell: bash
         run: |
           set -euo pipefail
@@ -88,8 +88,9 @@ jobs:
             exit 0
           fi
 
+          # 默认 confirm_delete=DELETE；保留一层兜底，避免输入被清空导致误删逻辑不一致
           if [ "${CONFIRM_DELETE}" != "DELETE" ]; then
-            echo "ERROR: Refuse to delete. Set confirm_delete=DELETE to proceed."
+            echo "ERROR: confirm_delete must be DELETE when delete_existing=true"
             exit 1
           fi
 
@@ -248,9 +249,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Enable Pages for ${ORG}/${NEW_REPO} (workflow build)"
-
-          # Create Pages (if not exist)
           RESP1="$(mktemp)"
           CODE1="$(curl -sS -o "${RESP1}" -w "%{http_code}" \
             -X POST \
@@ -272,7 +270,6 @@ jobs:
             cat "${RESP1}" || true
           fi
 
-          # Force update Pages (safe)
           RESP2="$(mktemp)"
           CODE2="$(curl -sS -o "${RESP2}" -w "%{http_code}" \
             -X PUT \
